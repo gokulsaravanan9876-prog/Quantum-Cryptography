@@ -9,8 +9,7 @@ from quantum.application.secure_communication import (
     SecureCommunicationService,
 )
 from quantum.qkd.channel import ChannelConfiguration
-from quantum.qkd.risk_fusion import combined_risk
-from quantum.qkd.security import SecurityController
+from quantum.qkd.risk_fusion import normalize_qber
 from quantum.scenarios.eve import run_eve_scenario
 from quantum.scenarios.noise import run_noise_scenario
 from quantum.scenarios.normal import run_normal_scenario
@@ -32,6 +31,89 @@ def _fmt_risk(score) -> str:
     return f"{score:.4f} (project-defined heuristic, NOT a probability)"
 
 
+def _fmt_norm(qber) -> str:
+    norm = normalize_qber(qber)
+    return f"{norm:.4f}" if norm is not None else "N/A"
+
+
+def _ml_status() -> list[str]:
+    """Report real trained-artifact availability (honest, never faked)."""
+    try:
+        from ml_bridge import try_load_scorer
+    except Exception as exc:  # ML deps missing entirely
+        return [f"REAL NSL-KDD MODEL: UNAVAILABLE ({type(exc).__name__})",
+                "Using synthetic demonstration inputs only."]
+    scorer = try_load_scorer()
+    if scorer is not None:
+        return [f"REAL NSL-KDD MODEL: available ({scorer.model_path})"]
+    return ["REAL NSL-KDD MODEL: UNAVAILABLE",
+            "Using synthetic demonstration inputs only."]
+
+
+def _real_case_inputs():
+    """Real low/high-threat records from genuine KDDTest+.txt, or None.
+
+    Returns ``(scorer, data_path, low, high)`` where ``low``/``high`` are
+    ``(score, row_index, record)`` chosen as min/max over the first 500
+    genuine records — deterministic given the fixed artifact + dataset.
+    """
+    try:
+        from ml_bridge import find_nsl_kdd_data, load_nsl_kdd_records, \
+            try_load_scorer
+        scorer = try_load_scorer()
+        data = find_nsl_kdd_data()
+        if scorer is None or data is None:
+            return None
+        records = load_nsl_kdd_records(data, limit=500)
+        scored = [(scorer.score_record(rec), i, rec)
+                  for i, rec in enumerate(records)]
+        low, high = min(scored), max(scored)
+        if not low[0] < high[0]:
+            return None
+        return scorer, data, low, high
+    except Exception:  # missing deps/data -> honest synthetic fallback
+        return None
+
+
+def _print_real_cases(real) -> None:
+    """Four required cases using REAL NSL-KDD model outputs."""
+    _scorer, data, low, high = real
+    print(f"  REAL records from  : {data} (first 500 rows scanned)")
+    print("  ML threat scores below are REAL model outputs "
+          "(RandomForest predict_proba[:,1] —")
+    print("  UNCALIBRATED attack-likeness score, NOT a calibrated "
+          "probability).")
+    print("  QKD conditions are SIMULATED (Qiskit Aer BB84); Combined "
+          "Risk Score is a")
+    print("  project-defined MAX heuristic, NOT a probability; every "
+          "Final Decision")
+    print("  comes ONLY from SecurityController.")
+    cases = [
+        ("CASE R1 — low-threat record + CLEAN QKD",
+         run_normal_scenario, 7, low),
+        ("CASE R2 — high-threat record + CLEAN QKD (escalation)",
+         run_normal_scenario, 7, high),
+        ("CASE R3 — low-threat record + EAVESDROPPED QKD",
+         run_eve_scenario, 23, low),
+        ("CASE R4 — high-threat record + EAVESDROPPED QKD",
+         run_eve_scenario, 23, high),
+    ]
+    for title, run, seed, (score, idx, rec) in cases:
+        res = run(requested_key_bits=128, seed=seed, threat_score=score)
+        a = res.assessment
+        print(f"\n  {title}")
+        print(f"    Record              : KDDTest+.txt row {idx} "
+              f"(ground-truth label: {rec.get('label')})")
+        print(f"    ML Threat Score     : {a.threat_score:.4f}  "
+              f"[REAL NSL-KDD MODEL, uncalibrated]")
+        print(f"    QBER                : {_fmt_qber(res.qber)}  "
+              f"[SIMULATED QKD]")
+        print(f"    Normalized QBER     : {_fmt_norm(res.qber)}")
+        print(f"    Combined Risk Score : "
+              f"{_fmt_risk(a.combined_risk_score)}")
+        print(f"    Final Decision      : {res.security_decision.value}")
+
+
 def _print_assessment(title, result, extra="") -> None:
     assessment = result.assessment
     print(f"\n{title}\n{extra}")
@@ -39,6 +121,7 @@ def _print_assessment(title, result, extra="") -> None:
     print(f"  ML Threat Score    : "
           f"{_fmt_threat(assessment.threat_score if assessment else None)}")
     print(f"  QBER               : {_fmt_qber(result.qber)}")
+    print(f"  Normalized QBER    : {_fmt_norm(result.qber)}")
     print(f"  Combined Risk Score: "
           f"{_fmt_risk(assessment.combined_risk_score if assessment else None)}")
     print(f"  Final Decision     : {result.security_decision.value}")
@@ -73,23 +156,42 @@ def main() -> None:
                       "  Eavesdropper      : intercept-resend (simulated)")
 
     print("\n--------------------------------------------------------")
-    print("RISK FUSION (Combined Risk Score = project-defined MAX heuristic)")
+    print("ML x QUANTUM INTEGRATION CASES")
     print("--------------------------------------------------------")
-    print("  NOT a probability of compromise; never overrides QBER,")
-    print("  key_success, or endpoint-key checks. Decisions below come")
-    print("  ONLY from SecurityController. NSL-KDD model NOT integrated:")
-    print("  threat_score values below are ILLUSTRATIVE external inputs.")
-    for label, threat, qber in [
-        ("ML hot / quantum clean", 0.90, 0.010),
-        ("quantum hot / ML clean", 0.05, 0.240),
-        ("both calm (typical)", 0.10, 0.010),
-        ("both high", 0.90, 0.240),
-    ]:
-        combined = combined_risk(qber, threat)
-        decision = SecurityController().evaluate(
-            qber, threat_score=threat).decision.value
-        print(f"  {label:<24} ML={threat:.2f} QBER={qber:.3f} "
-              f"-> Combined={combined:.4f}  Decision={decision}")
+    _status = _ml_status()
+    print(f"  {_status[0]}")
+    for _line in _status[1:]:
+        print(f"  {_line}")
+    print("  REAL interface : ml_bridge.NSLKDDThreatScorer"
+          ".score_record(record) -> float")
+    real = _real_case_inputs()
+    if real is not None:
+        _print_real_cases(real)
+    else:
+        print("  Threat scores below are SYNTHETIC demo literals —")
+        print("  NOT NSL-KDD model predictions. Combined Risk Score is a")
+        print("  project-defined MAX heuristic, NOT a probability; every")
+        print("  Final Decision comes ONLY from SecurityController.")
+        for title, run, threat in [
+            ("CASE 1 — Normal (low ML threat, low QBER)",
+             run_normal_scenario, 0.05),
+            ("CASE 2 — ML-hot / quantum-clean (escalation)",
+             run_normal_scenario, 0.90),
+            ("CASE 3 — ML-clean / quantum-hot",
+             run_eve_scenario, 0.05),
+            ("CASE 4 — Both high",
+             run_eve_scenario, 0.90),
+        ]:
+            res = run(requested_key_bits=128, threat_score=threat)
+            a = res.assessment
+            print(f"\n  {title}")
+            print(f"    ML Threat Score     : {a.threat_score:.2f}  "
+                  f"[SYNTHETIC demo input]")
+            print(f"    QBER                : {_fmt_qber(res.qber)}")
+            print(f"    Normalized QBER     : {_fmt_norm(res.qber)}")
+            print(f"    Combined Risk Score : "
+                  f"{_fmt_risk(a.combined_risk_score)}")
+            print(f"    Final Decision      : {res.security_decision.value}")
 
     print("\n--------------------------------------------------------")
     print("SECURE BIOMEDICAL TRANSMISSION")
@@ -111,6 +213,7 @@ def main() -> None:
     print(f"ML Threat Score    : "
           f"{_fmt_threat(_assessment.threat_score if _assessment else None)}")
     print(f"QBER               : {_fmt_qber(sent.session.qber)}")
+    print(f"Normalized QBER    : {_fmt_norm(sent.session.qber)}")
     print(f"Combined Risk Score: "
           f"{_fmt_risk(_assessment.combined_risk_score if _assessment else None)}")
     print(f"Final Decision     : {sent.session.security_decision.value}")

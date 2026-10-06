@@ -165,7 +165,11 @@ class SecureCommunicationService:
         self.engine = engine or BB84Engine()
         self.controller = controller or SecurityController()
 
-    def _run_qkd(self, session, channel_config, seed):
+    def _run_qkd(self, session, channel_config, seed, threat_score=None):
+        # threat_score: externally supplied ML threat score (float in
+        # [0,1]) or None for QKD-only operation. It only reaches
+        # SecurityController.evaluate — the endpoint-key gate below is
+        # completely independent of it.
         session.transition(SessionState.QKD_IN_PROGRESS)
         qkd_result = self.engine.establish_key(
             QKDRequest(requested_key_bits=session.requested_key_size,
@@ -173,7 +177,8 @@ class SecureCommunicationService:
         session.qkd_result = qkd_result
         session.qber = qkd_result.qber
         assessment = self.controller.evaluate(
-            qber=qkd_result.qber, key_success=qkd_result.success,
+            qber=qkd_result.qber, threat_score=threat_score,
+            key_success=qkd_result.success,
             eavesdropping_indicated=channel_config.eavesdropper.enabled,
             noise_probability=channel_config.noise_probability)
         session.security_decision = assessment.decision
@@ -200,7 +205,10 @@ class SecureCommunicationService:
 
     def send_biomedical_data(self, source, destination, message,
                              channel_config=None, requested_key_bits=256,
-                             seed=None):
+                             seed=None, threat_score=None):
+        """Run QKD + AES-GCM delivery. threat_score=None (default) keeps
+        QKD-only behaviour; a float in [0,1] is the externally supplied
+        ML threat score (see ml_bridge) fed to SecurityController only."""
         _require_crypto()
         channel_config = channel_config or ChannelConfiguration.normal()
         msg = (message if isinstance(message, BiomedicalMessage)
@@ -209,7 +217,8 @@ class SecureCommunicationService:
                                 source_hospital=source,
                                 destination_hospital=destination,
                                 requested_key_size=requested_key_bits)
-        assessment = self._run_qkd(session, channel_config, seed)
+        assessment = self._run_qkd(session, channel_config, seed,
+                                   threat_score)
         if assessment.decision is not SecurityDecision.ACCEPT:
             note = ("MONITOR: held for review under project policy; "
                     "not silently treated as ACCEPT."
