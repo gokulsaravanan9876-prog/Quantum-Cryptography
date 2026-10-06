@@ -13,6 +13,12 @@ from quantum.qkd.channel import (
     EavesdropperConfig,
     QuantumChannel,
 )
+from quantum.qkd.risk_fusion import (
+    FusionMethod,
+    RiskFusionConfig,
+    combined_risk,
+    normalize_qber,
+)
 from quantum.qkd.security import (
     SecurityAssessment,
     SecurityController,
@@ -28,10 +34,14 @@ __all__ = [
     "ChannelConfiguration",
     "ChannelMode",
     "EavesdropperConfig",
+    "FusionMethod",
     "QuantumChannel",
+    "RiskFusionConfig",
     "SecurityAssessment",
     "SecurityController",
     "SecurityDecision",
     "SecurityObservation",
     "SecurityPolicy",
+    "combined_risk",
+    "normalize_qber",
 ]

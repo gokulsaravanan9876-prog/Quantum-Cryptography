@@ -61,6 +61,10 @@ class SecurityAssessment:
     reasons: list[str] = field(default_factory=list)
     qber: float | None = None
     threat_score: float | None = None
+    # Display-only Combined Risk Score (project-defined MAX heuristic, see
+    # quantum.qkd.risk_fusion). NEVER used to choose `decision`. None when
+    # there is no quantum observation (qber is None).
+    combined_risk_score: float | None = None
 
 
 class SecurityController:
@@ -82,10 +86,17 @@ class SecurityController:
         if threat_score is not None and not 0.0 <= threat_score <= 1.0:
             raise ValueError("threat_score must be in [0, 1]")
 
+        # Display-only Combined Risk Score (project-defined MAX heuristic;
+        # local import avoids a module import cycle). Computed purely for
+        # observability — the decision logic below is completely unaffected.
+        from quantum.qkd.risk_fusion import combined_risk as _combined_risk
+        combined = _combined_risk(qber, threat_score)
+
         if not key_success or qber is None:
             reasons.append("key establishment failed; no usable key material")
             return SecurityAssessment(
-                SecurityDecision.REJECT, reasons, qber, threat_score
+                SecurityDecision.REJECT, reasons, qber, threat_score,
+                combined
             )
 
         if qber <= self.policy.accept_threshold:
@@ -123,5 +134,12 @@ class SecurityController:
                     decision = SecurityDecision.REJECT
                     reasons.append("threat score escalated MONITOR -> REJECT")
 
+        if combined is not None:
+            reasons.append(
+                f"combined risk score={combined:.4f} "
+                "(project-defined display heuristic; not a probability; "
+                "does not affect the decision)")
+
         logger.debug("security assessment: %s (%s)", decision, "; ".join(reasons))
-        return SecurityAssessment(decision, reasons, qber, threat_score)
+        return SecurityAssessment(decision, reasons, qber, threat_score,
+                                  combined)
